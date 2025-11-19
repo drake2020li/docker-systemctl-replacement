@@ -20,6 +20,8 @@ import shlex
 import fnmatch
 import re
 from types import GeneratorType
+import ctypes, ctypes.util
+import subprocess
 
 __copyright__ = "(C) 2016-2025 Guido U. Draheim, licensed under the EUPL"
 __version__ = "1.5.9063"
@@ -6130,7 +6132,7 @@ class Systemctl:
                 self.read_log_files(units)
                 if DEBUG_INITLOOP: # pragma: no cover
                     logg.debug("reap zombies - check current processes")
-                running = self.reap_zombies()
+                running = self.reap_zombies_subreaper()
                 if DEBUG_INITLOOP: # pragma: no cover
                     logg.debug("reap zombies - init-loop found %s running procs", running)
                 if self.doExitWhenNoMoreServices:
@@ -6178,6 +6180,23 @@ class Systemctl:
         """ -- check to reap children (internal) """
         running = self.reap_zombies()
         return "remaining {running} process".format(**locals())
+
+    def reap_zombies_subreaper(self):
+        while True:
+            try:
+                pid, status = os.waitpid(-1, os.WNOHANG)
+                if pid == 0:
+                    break
+            except ChildProcessError:
+                break
+
+        selfpid = os.getpid()
+        count = subprocess.check_output(
+            ["sh", "-c", f"/bin/ps -o pid= --ppid {selfpid} | /usr/bin/wc -l"],
+            text=True
+        )
+        return int(count.strip())
+
     def reap_zombies(self):
         """ check to reap children """
         selfpid = os.getpid()
@@ -6679,7 +6698,16 @@ def runcommand(command, *modules):
     exitcode |= systemctl.error
     return exitcode
 
+def set_subreaper():
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    PR_SET_CHILD_SUBREAPER = 36
+    r = libc.prctl(PR_SET_CHILD_SUBREAPER, 1)
+    if r != 0:
+        raise OSError("prctl(PR_SET_CHILD_SUBREAPER) failed")
+
 if __name__ == "__main__":
+    set_subreaper()
+
     import optparse
     _o = optparse.OptionParser("%prog [options] command [name...]",
                                epilog="use 'help' command for more information")

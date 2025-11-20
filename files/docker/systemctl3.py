@@ -1328,6 +1328,7 @@ class Systemctl:
     # |
     # |
     def __init__(self):
+        self.children_count = 0
         self.error = NOT_A_PROBLEM # program exitcode or process returncode
         # from command line options or the defaults
         self._extra_vars = _extra_vars
@@ -6182,20 +6183,43 @@ class Systemctl:
         return "remaining {running} process".format(**locals())
 
     def reap_zombies_subreaper(self):
+        if not self.children_count:
+            self.children_count = self.count_children()
+
         while True:
             try:
                 pid, status = os.waitpid(-1, os.WNOHANG)
                 if pid == 0:
-                    break
+                    # 没有更多退出的子进程
+                    if not self.children_count:  # 缓存为空或已被置0
+                        self.children_count = self.count_children()
+                    return self.children_count
+                # 成功收割一个子进程 → 缓存不再准确
+                self.children_count = 0
             except ChildProcessError:
-                break
+                # 没有子进程
+                return 0
 
+    def count_children(self):
         selfpid = os.getpid()
-        count = subprocess.check_output(
-            ["sh", "-c", f"/bin/ps -o pid= --ppid {selfpid} | /usr/bin/wc -l"],
-            text=True
-        )
-        return int(count.strip())
+
+        count = 0
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            stat_path = f"/proc/{entry}/stat"
+            try:
+                with open(stat_path, "r") as f:
+                    data = f.read()
+                    # 正确解析 stat 格式
+                    end = data.rfind(")")
+                    rest = data[end+2:].split()
+                    ppid = int(rest[1])   # rest[0]=state, rest[1]=ppid
+                    if ppid == selfpid:
+                        count += 1
+            except (IOError, ValueError):
+                continue
+        return count
 
     def reap_zombies(self):
         """ check to reap children """
